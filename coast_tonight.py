@@ -63,10 +63,35 @@ def color_enabled(mode, stream):
         return True
     if mode == "never" or "NO_COLOR" in os.environ:
         return False
+    if mode == "auto" and os.name == "nt":
+        # Legacy Command Prompt may display ANSI escape sequences literally.
+        # Windows Terminal, ConEmu, and ANSI-enabled shells advertise support
+        # through one of these environment variables.
+        ansi_environment = (
+            os.environ.get("WT_SESSION")
+            or os.environ.get("ANSICON")
+            or os.environ.get("ConEmuANSI") == "ON"
+            or os.environ.get("TERM") not in (None, "", "dumb")
+        )
+        if not ansi_environment:
+            return False
     try:
         return bool(stream.isatty()) and os.environ.get("TERM") != "dumb"
     except (AttributeError, OSError):
         return False
+
+
+def configure_console():
+    """Prefer UTF-8 output on Windows consoles and redirected streams."""
+    if os.name != "nt":
+        return
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, OSError, ValueError):
+            # Some test doubles and older stream wrappers do not support
+            # reconfigure; the normal Windows streams do.
+            continue
 
 
 @dataclass
@@ -196,8 +221,13 @@ def parse_tonight(html):
     url = ""
     show_date = ""
     for link in tonight.find_all(tag="a"):
-        candidate = urljoin(HOME_URL, link.attrs.get("href", ""))
-        parsed = urlsplit(candidate)
+        try:
+            candidate = urljoin(HOME_URL, link.attrs.get("href") or "")
+            parsed = urlsplit(candidate)
+        except (TypeError, ValueError):
+            # Ignore malformed unrelated links and continue looking for the
+            # validated same-origin show URL.
+            continue
         match = re.fullmatch(r"/show/(\d{4}-\d{2}-\d{2})-show/?", parsed.path)
         if match and parsed.scheme == "https" and parsed.netloc == urlsplit(HOME_URL).netloc:
             try:
@@ -330,6 +360,7 @@ def positive_timeout(value):
 
 
 def main(argv=None):
+    configure_console()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--json", action="store_true", help="print structured JSON")
     parser.add_argument("--open", action="store_true", help="also open the show page in your browser")
